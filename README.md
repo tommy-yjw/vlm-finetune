@@ -4,11 +4,15 @@
 
 ## 目录结构
 - `train.py`：主训练脚本，支持多种微调策略和参数配置。
+- `train_grpo.py`：GRPO 算法训练脚本，用于基于奖励函数进行模型优化。
 - `inference.py`：推理脚本，加载微调后的模型进行图片问答。
-- `datasets/custom_dataset.py`：自定义数据集类，支持像素过滤和数据增强。
+- `datasets/custom_dataset.py`：自定义数据集类，支持像素过滤和多图数据处理。
 - `evaluation/eval_vqa_template.py`：评估模板，可扩展自定义评估逻辑。
 - `configs/deepspeed_config.json`：DeepSpeed 配置文件。
+- `core/grpo_utils.py`：GRPO 算法核心工具函数，包含损失计算和 log_probs 计算。
+- `reward_function.py`：奖励函数定义脚本，可自定义奖励逻辑。
 - `run_full_finetune.sh`、`run_lora_llm_full_vit.sh`、`run_partial_llm_full_vit.sh`、`run_qlora_advanced.sh`、`run_qlora_multi_dataset.sh`、`run_vit_only.sh`、`run_qlora_windows.bat`：多种微调策略的启动脚本。
+- `run_grpo.sh`：GRPO 训练启动脚本。
 - `requirements.txt`：依赖库列表。
 - `output/`：模型输出和日志目录。
 - `data/`：数据集目录，需包含 `data.json` 和图片文件夹。
@@ -23,7 +27,8 @@ pip install -r requirements.txt
 - 示例：`data/dataset1/data.json`、`data/dataset1/images/`
 
 ## 训练方法
-- 选择合适的脚本（如 `run_full_finetune.sh`），根据实际 GPU 数量和数据路径修改参数。
+- **常规微调**：选择合适的脚本（如 `run_full_finetune.sh`），根据实际 GPU 数量和数据路径修改参数。
+- **GRPO 训练**：使用 `run_grpo.sh` 脚本，需指定预训练的 LoRA 适配器路径和自定义的奖励函数脚本路径。
 - 支持恢复训练：脚本第一个参数为 checkpoint 目录时自动恢复。
 - 训练日志可通过 wandb 或本地文件记录。
 
