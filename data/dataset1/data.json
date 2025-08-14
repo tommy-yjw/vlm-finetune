@@ -1,0 +1,30 @@
+[
+    {
+        "id": "sample_1",
+        "image": "image1.jpg",
+        "conversations": [
+            {
+                "from": "human",
+                "value": "<image>\n这张图里有什么？"
+            },
+            {
+                "from": "gpt",
+                "value": "这张图里有一只猫和一只狗在草地上玩耍。"
+            }
+        ]
+    },
+    {
+        "id": "sample_2",
+        "image": "image2.png",
+        "conversations": [
+            {
+                "from": "human",
+                "value": "请描述一下<image>中的场景。"
+            },
+            {
+                "from": "gpt",
+                "value": "这是一个美丽的日落海滩场景，天空被染成了橙色和紫色。"
+            }
+        ]
+    }
+]
