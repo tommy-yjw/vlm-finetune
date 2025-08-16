@@ -1,58 +1,102 @@
-# Qwen2.5-VL 微调项目
+# Qwen2.5-VL 多功能微调框架
 
-本项目用于对 Qwen2.5-VL 多模态大模型进行多种微调策略（全参数、LoRA、QLoRA、视觉部分、部分 LLM 等），支持多数据集、DeepSpeed 加速、wandb 日志和自定义评估。
+本项目是一个为 Qwen2.5-VL 多模态大模型设计的多功能微调框架。它集成了多种主流的微调策略，并提供从数据处理、模型训练、模型评估到最终推理的全流程支持。
 
-## 目录结构
-- `train.py`：主训练脚本，支持多种微调策略和参数配置。
-- `train_grpo.py`：GRPO 算法训练脚本，用于基于奖励函数进行模型优化。
-- `inference.py`：推理脚本，加载微调后的模型进行图片问答。
-- `datasets/custom_dataset.py`：自定义数据集类，支持像素过滤和多图数据处理。
-- `evaluation/eval_vqa_template.py`：评估模板，可扩展自定义评估逻辑。
-- `configs/deepspeed_config.json`：DeepSpeed 配置文件。
-- `core/grpo_utils.py`：GRPO 算法核心工具函数，包含损失计算和 log_probs 计算。
-- `reward_function.py`：奖励函数定义脚本，可自定义奖励逻辑。
-- `run_full_finetune.sh`、`run_lora_llm_full_vit.sh`、`run_partial_llm_full_vit.sh`、`run_qlora_advanced.sh`、`run_qlora_multi_dataset.sh`、`run_vit_only.sh`、`run_qlora_windows.bat`：多种微调策略的启动脚本。
-- `run_grpo.sh`：GRPO 训练启动脚本。
-- `requirements.txt`：依赖库列表。
-- `output/`：模型输出和日志目录。
-- `data/`：数据集目录，需包含 `data.json` 和图片文件夹。
+## ✨ 功能特性
 
-## 安装依赖
+- **多种微调策略**：支持全参数微调、LoRA、QLoRA，并允许仅微调视觉（ViT）或语言模型（LLM）部分。
+- **高级训练算法**：集成 GRPO (Group Reward Policy Optimization) 算法，可通过自定义奖励函数进行策略优化。
+- **分布式训练**：深度集成 DeepSpeed (ZeRO-2/3)，支持多机多卡高效训练。
+- **多数据集支持**：可同时加载和训练多个不同来源的数据集。
+- **灵活的评估**：支持训练过程中和训练后进行评估，并可轻松扩展自定义评估脚本。
+- **详细日志**：支持 Weights & Biases (wandb) 和本地日志记录，方便监控训练过程。
+
+## 📂 目录结构
+
+- `train.py`: SFT（监督微调）主训练脚本。
+- `train_grpo.py`: GRPO 算法训练脚本。
+- `inference.py`: 推理脚本，用于与微调后的模型进行交互。
+- `evaluation/`: 评估脚本目录。
+  - `eval_sft.py`: SFT 模型的评估脚本。
+  - `eval_vqa_template.py`: 自定义评估逻辑的模板。
+- `datasets/`: 数据集处理相关脚本。
+- `configs/`: 配置文件目录（如 DeepSpeed 配置）。
+- `run_*.sh`: 各种微调策略的启动脚本。
+- `data/`: 示例数据集目录结构。
+- `output/`: 训练输出目录，存放模型权重和日志。
+
+## 🚀 快速开始
+
+### 1. 环境准备
+
+首先，克隆项目并安装所需的依赖库：
+
 ```bash
+git clone <your-repo-url>
+cd qwen_finetune_project
 pip install -r requirements.txt
 ```
 
-## 数据准备
-- 数据集需为 JSON 格式，包含图片路径和对话内容，图片存放于指定文件夹。
-- 示例：`data/dataset1/data.json`、`data/dataset1/images/`
+### 2. 数据准备
 
-## 训练方法
-- **常规微调**：选择合适的脚本（如 `run_full_finetune.sh`），根据实际 GPU 数量和数据路径修改参数。
-- **GRPO 训练**：使用 `run_grpo.sh` 脚本，需指定预训练的 LoRA 适配器路径和自定义的奖励函数脚本路径。
-- 支持恢复训练：脚本第一个参数为 checkpoint 目录时自动恢复。
-- 训练日志可通过 wandb 或本地文件记录。
+将您的数据集按以下结构存放：
 
-## 推理方法
-```bash
-python inference.py --model_path ./output/xxx/final_model --image_path ./test.jpg --prompt "图片里有什么？"
+```
+data/
+└── your_dataset_name/
+    ├── data.json       # 标注文件
+    └── images/         # 图片文件夹
+        ├── image1.jpg
+        └── image2.png
 ```
 
-## 评估扩展
-- 可在训练参数中通过 `--eval_scripts` 指定自定义评估脚本。
-- 参考 `evaluation/eval_vqa_template.py` 实现评估逻辑。
+`data.json` 应为包含对话和图片路径的 JSON 格式。
 
-## 主要依赖
-- transformers
-- torch
-- deepspeed
-- peft
-- Pillow
-- torchvision
-- wandb
+### 3. 开始训练
 
-## 说明
-- 推荐使用 Linux/Mac 环境，Windows 可用 `.bat` 脚本。
-- GPU 资源和 batch size 请根据实际情况调整。
-- 支持多数据集、像素过滤和视觉数据增强。
+根据您的需求选择一个启动脚本，例如，使用 QLoRA 进行微调：
 
-如有问题欢迎反馈或交流。
+```bash
+bash run_qlora_advanced.sh
+```
+
+在运行前，请根据实际情况修改脚本内的 `BASE_MODEL_PATH`、`DATA_PATH` 和其他训练参数。
+
+### 4. 模型评估
+
+训练完成后，您可以使用评估脚本来测试模型性能。例如，评估一个 SFT 模型：
+
+```bash
+bash run_eval_sft.sh ./output/your_model_checkpoint
+```
+
+### 5. 模型推理
+
+使用 `inference.py` 脚本与您的模型进行交互：
+
+```bash
+python inference.py \
+  --model_path ./output/your_model_checkpoint/final_model \
+  --image_path ./path/to/your/image.jpg \
+  --prompt "描述一下这张图片"
+```
+
+## 📚 详细指南
+
+本项目提供了更详细的微调指南，帮助您深入了解不同训练策略的配置和原理：
+
+- **[SFT 微调指南](./SFT_tuning_guide.md)**：涵盖了全参数、LoRA、QLoRA 等多种微调方法的详细说明。
+- **[GRPO 训练指南](./GRPO_tuning_guide.md)**：介绍了如何使用 GRPO 算法和自定义奖励函数来优化模型。
+
+## 🛠️ 脚本说明
+
+- `run_full_finetune.sh`: 全参数微调。
+- `run_lora_llm_full_vit.sh`: LoRA 微调 LLM，全参数微调 ViT。
+- `run_qlora_advanced.sh`: 使用 QLoRA 进行高效微调。
+- `run_qlora_multi_dataset.sh`: 使用 QLoRA 同时在多个数据集上微调。
+- `run_grpo.sh`: 启动 GRPO 训练。
+- `run_eval_sft.sh`: 运行 SFT 模型评估。
+
+---
+
+如有任何问题，欢迎提交 issue 或参与讨论。
