@@ -1,0 +1,19 @@
+{
+  "datasets": {
+    "my_dataset_1": {
+      "image_root": "./data/dataset1/images",
+      "json_path": "./data/dataset1/data.json",
+      "dataset_class": "QwenVLDataset"
+    },
+    "my_dataset_2": {
+      "image_root": "./data/dataset2/pictures",
+      "json_path": "./data/dataset2/data.json",
+      "dataset_class": "QwenVLDataset"
+    },
+    "my_grpo_dataset": {
+      "image_root": "./data/dataset1/images",
+      "json_path": "./data/dataset1/grpo_dataset.json",
+      "dataset_class": "QwenVLDataset"
+    }
+  }
+}

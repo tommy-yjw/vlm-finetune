@@ -4,9 +4,9 @@ from typing import List, Tuple, Dict
 def calculate_log_probs(
     model,
     sequences: torch.Tensor,
-    sequence_lengths: torch.Tensor,
     attention_mask: torch.Tensor,
-    image_tensors: torch.Tensor
+    pixel_values: torch.Tensor, # Changed from image_tensors
+    prompt_len: int = None # Added prompt_len for flexibility
 ) -> torch.Tensor:
     """
     计算给定序列的对数概率。
@@ -27,24 +27,28 @@ def calculate_log_probs(
 
     with torch.no_grad():
         # 获取模型的logits输出
-        outputs = model(input_ids=sequences, attention_mask=attention_mask, images=image_tensors)
+        outputs = model(input_ids=sequences, attention_mask=attention_mask, pixel_values=pixel_values) # Changed images to pixel_values
         logits = outputs.logits
 
         # 将logits转换为对数概率
         log_probs = torch.log_softmax(logits, dim=-1)
 
         # 提取目标token的对数概率 (即输入序列中每个token的概率)
-        # 我们需要将sequences向左移动一位来作为目标
-        target_sequences = sequences[:, 1:].contiguous()
-        log_probs = log_probs[:, :-1, :].contiguous()
+        # 如果提供了 prompt_len，则只计算生成部分的对数概率
+        if prompt_len is not None:
+            target_sequences = sequences[:, prompt_len:].contiguous()
+            log_probs = log_probs[:, prompt_len - 1:-1, :].contiguous() # Logits for generated tokens
+        else:
+            target_sequences = sequences[:, 1:].contiguous()
+            log_probs = log_probs[:, :-1, :].contiguous()
 
         # 使用gather从log_probs中选取目标token的概率
-        # target_sequences.unsqueeze(-1) 将其形状变为 (batch_size, seq_len-1, 1)
-        # gather会根据这个索引在最后一个维度上选取概率
         selected_log_probs = log_probs.gather(dim=-1, index=target_sequences.unsqueeze(-1)).squeeze(-1)
 
         # 创建一个掩码，只计算非填充部分的对数概率
-        mask = torch.arange(selected_log_probs.size(1), device=sequences.device)[None, :] < (sequence_lengths - 1)[:, None]
+        # 对于生成部分，我们通常不需要额外的长度掩码，因为我们只关心生成的token
+        # 但如果需要考虑padding，可以保留或调整
+        mask = (target_sequences != model.config.pad_token_id) # Mask out padding tokens
         selected_log_probs = selected_log_probs * mask
 
         # 对每个序列的对数概率求和

@@ -8,3 +8,5 @@ wandb>=0.15.0
 accelerate>=0.25.0
 bitsandbytes>=0.41.3
 flash-attn>=2.5.0
+importlib-metadata>=6.0.0
+scipy>=1.10.0

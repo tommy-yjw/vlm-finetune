@@ -4,10 +4,6 @@
 export BASE_MODEL="Qwen/Qwen2.5-7B-VL-Chat"
 export OUTPUT_DIR="./output/qwen_full_finetune"
 export DS_CONFIG="./configs/deepspeed_config.json"
-export DATASET1_JSON="./data/dataset1/data.json"
-export DATASET1_IMG_ROOT="./data/dataset1/images"
-export DATASET2_JSON="./data/dataset2/data.json"
-export DATASET2_IMG_ROOT="./data/dataset2/images"
 
 # --- GPU与并行配置 ---
 NUM_GPUS=4
@@ -17,6 +13,9 @@ NUM_WORKERS=8 # 根据你的CPU核心数和内存大小调整
 EPOCHS=3
 BATCH_SIZE_PER_GPU=1
 GRAD_ACCUM_STEPS=16
+MIN_PIXELS=50000 # 示例值，根据需要调整
+MAX_PIXELS=1000000 # 示例值，根据需要调整
+TRAIN_SPLIT_RATIO=0.9 # 训练集划分比例，0.0到1.0之间
 
 # --- 启动命令 ---
 # 检查是否需要恢复训练
@@ -36,8 +35,11 @@ deepspeed --num_gpus=${NUM_GPUS} train.py \
     \
     --tuning_strategy "full" \
     \
-    --datasets ${DATASET1_JSON} ${DATASET1_IMG_ROOT} \
-    --datasets ${DATASET2_JSON} ${DATASET2_IMG_ROOT} \
+    --dataset_config_path ./configs/dataset_config.json \
+    --dataset_names my_dataset_1 my_dataset_2 \
+    --min_pixels ${MIN_PIXELS} \
+    --max_pixels ${MAX_PIXELS} \
+    --train_split_ratio ${TRAIN_SPLIT_RATIO} \
     \
     --epochs ${EPOCHS} \
     --per_device_train_batch_size ${BATCH_SIZE_PER_GPU} \
@@ -51,6 +53,15 @@ deepspeed --num_gpus=${NUM_GPUS} train.py \
     --max_seq_length 2048 \
     --save_steps 500 \
     --eval_steps 250 \
+    \
+    --temperature 1.0 \
+    --top_p 1.0 \
+    --top_k 50 \
+    \
+    --eval_script_registry_path ./configs/eval_script_registry.json \
+    --eval_dataset_scripts \
+        "my_dataset_1:bbox_mbr_pass_rate,bbox_per_object" \
+        "my_dataset_2:vqa_template" \
     \
     --use_wandb --wandb_project "qwen-vl-finetune" --wandb_run_name "full-finetune-run" \
     --log_to_file

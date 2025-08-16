@@ -17,8 +17,7 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
-# 动态导入，因为 custom_dataset.py 现在有两个类
-from datasets.custom_dataset import QwenVLDataset, QwenVLDatasetWithAug
+from datasets.dataset_registry import get_dataset, register_dataset, load_datasets_from_config # 导入数据集注册模块和加载函数
 
 # 尝试导入 wandb
 try:
@@ -98,10 +97,11 @@ def parse_arguments():
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="从指定的DeepSpeed检查点目录恢复训练")
     
     # --- 数据集配置 ---
-    parser.add_argument("--datasets", nargs=2, action='append', metavar=('JSON_PATH', 'IMAGE_ROOT'), required=True, help="指定初始数据集")
-    parser.add_argument("--dynamic_dataset_dir", type=str, default=None, help="动态加载数据集的目录")
+    parser.add_argument("--dataset_config_path", type=str, default="./configs/dataset_config.json", help="数据集注册配置文件的路径")
+    parser.add_argument("--dataset_names", type=str, nargs='+', required=True, help="要使用的已注册数据集的名称列表")
     parser.add_argument("--min_pixels", type=int, default=None, help="图片的最小像素数 (宽 * 高)")
     parser.add_argument("--max_pixels", type=int, default=None, help="图片的最大像素数 (宽 * 高)")
+    parser.add_argument("--train_split_ratio", type=float, default=0.9, help="训练集和验证集的划分比例 (0.0到1.0之间)")
     parser.add_argument("--use_data_augmentation", action='store_true', help="对训练图片使用视觉数据增强")
 
     # --- 训练超参数 ---
@@ -116,6 +116,11 @@ def parse_arguments():
     parser.add_argument("--max_seq_length", type=int, default=2048, help="输入序列最大长度")
     parser.add_argument("--num_workers", type=int, default=4, help="DataLoader使用的工作进程数")
 
+    # --- 生成参数 (用于评估时的模型推理) ---
+    parser.add_argument("--temperature", type=float, default=1.0, help="生成时的温度")
+    parser.add_argument("--top_p", type=float, default=1.0, help="生成时的top_p")
+    parser.add_argument("--top_k", type=int, default=50, help="生成时的top_k")
+
     # --- 微调策略 ---
     parser.add_argument("--tuning_strategy", type=str, required=True,
                         choices=['full', 'lora_llm_full_vit', 'vit_only', 'partial_llm_full_vit', 'qlora'],
@@ -128,7 +133,9 @@ def parse_arguments():
     # --- 保存、评估与日志 ---
     parser.add_argument("--save_steps", type=int, default=500, help="每N步保存一次检查点")
     parser.add_argument("--eval_steps", type=int, default=250, help="每N步进行一次评估")
-    parser.add_argument("--eval_scripts", nargs=2, action='append', metavar=('NAME', 'SCRIPT_PATH'), help="指定评估脚本")
+    parser.add_argument("--eval_script_registry_path", type=str, default="./configs/eval_script_registry.json", help="评估脚本注册配置文件的路径")
+    parser.add_argument("--eval_dataset_scripts", type=str, nargs='*', default=[],
+                        help="指定要评估的数据集及其对应的评估脚本。格式: 'dataset_name:script_name1,script_name2 ...' (脚本名称在 eval_script_registry.json 中定义)")
     parser.add_argument("--use_wandb", action='store_true', help="启用WandB")
     parser.add_argument("--wandb_project", type=str, default="qwen_vl_finetune", help="WandB项目名称")
     parser.add_argument("--wandb_run_name", type=str, default=f"run-{int(time.time())}", help="WandB运行名称")
@@ -261,15 +268,6 @@ def create_optimizer(model: torch.nn.Module, args: argparse.Namespace):
 
     return torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
-def get_dataset_class(use_augmentation: bool):
-    """根据是否使用数据增强返回相应的数据集类"""
-    if use_augmentation:
-        logger.info("使用带数据增强的数据集: QwenVLDatasetWithAug")
-        return QwenVLDatasetWithAug
-    else:
-        logger.info("使用标准数据集: QwenVLDataset")
-        return QwenVLDataset
-
 def main():
     args = parse_arguments()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -279,6 +277,9 @@ def main():
         torch.cuda.set_device(args.local_rank)
     training_logger = TrainingLogger(args)
     
+    # Load and register datasets from config
+    load_datasets_from_config(args.dataset_config_path) # This registers dataset classes
+
     logger.info(f"正在从 {args.model_name_or_path} 加载模型和处理器...")
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
     
@@ -304,26 +305,112 @@ def main():
     
     model = setup_model_parameters(model, args)
 
-    DatasetClass = get_dataset_class(args.use_data_augmentation)
-    initial_datasets = [
-        DatasetClass(jp, ir, processor, args.max_seq_length, args.min_pixels, args.max_pixels) 
-        for jp, ir in args.datasets
-    ]
-    train_dataset = ConcatDataset(initial_datasets)
+    # Load evaluation script registry
+    eval_registry = {}
+    if os.path.exists(args.eval_script_registry_path):
+        with open(args.eval_script_registry_path, 'r', encoding='utf-8') as f:
+            eval_registry = json.load(f).get("eval_scripts", {})
+    else:
+        logger.warning(f"评估脚本注册文件未找到: {args.eval_script_registry_path}")
+
+    # Parse eval_dataset_scripts argument
+    eval_config_from_args = {} # {dataset_name: [[script_name, script_path], ...]}
+    all_eval_scripts_to_load = set() # Collect all unique eval scripts paths
+    for entry in args.eval_dataset_scripts:
+        parts = entry.split(':')
+        if len(parts) != 2:
+            logger.warning(f"无效的 --eval_dataset_scripts 格式: {entry}. 预期格式为 'dataset_name:script_name1,script_name2,...'. 跳过。")
+            continue
+        
+        dataset_name, script_names_str = parts
+        script_names = script_names_str.split(',')
+        
+        scripts_for_dataset = []
+        for script_name in script_names:
+            script_path = eval_registry.get(script_name)
+            if script_path:
+                scripts_for_dataset.append([script_name, script_path])
+                all_eval_scripts_to_load.add((script_name, script_path))
+            else:
+                logger.warning(f"在注册表中未找到评估脚本 '{script_name}'。")
+        
+        if scripts_for_dataset:
+            eval_config_from_args[dataset_name] = scripts_for_dataset
+
+    # Load all unique evaluation modules once
+    loaded_eval_modules = load_evaluation_modules(list(all_eval_scripts_to_load))
+    if not loaded_eval_modules and args.eval_steps > 0:
+        logger.warning("已设置 eval_steps > 0 但没有加载任何评估脚本，将只记录验证集损失。")
+
+    # Prepare datasets for training and evaluation
+    all_train_datasets = []
+    eval_datasets_by_name = {} # Store evaluation datasets by their original name
     
+    for dataset_name in args.dataset_names:
+        full_dataset = get_dataset(
+            name=dataset_name,
+            processor=processor,
+            max_length=args.max_seq_length,
+            min_pixels=args.min_pixels,
+            max_pixels=args.max_pixels
+        )
+        
+        if not full_dataset:
+            logger.error(f"无法加载数据集 '{dataset_name}'，请检查其是否已注册。")
+            exit(1)
+
+        # Split each dataset into train and eval parts
+        dataset_len = len(full_dataset)
+        train_len = int(args.train_split_ratio * dataset_len)
+        eval_len = dataset_len - train_len
+
+        if eval_len > 0:
+            train_part, eval_part = torch.utils.data.random_split(full_dataset, [train_len, eval_len])
+            all_train_datasets.append(train_part)
+            
+            # Only add to eval_datasets_by_name if it's specified for evaluation in args
+            if dataset_name in eval_config_from_args:
+                eval_datasets_by_name[dataset_name] = eval_part
+                logger.info(f"数据集 '{dataset_name}' 已划分为训练集 ({train_len} 条) 和验证集 ({eval_len} 条)，并准备进行特定评估。")
+            else:
+                logger.info(f"数据集 '{dataset_name}' 已划分为训练集 ({train_len} 条) 和验证集 ({eval_len} 条)。")
+        else:
+            all_train_datasets.append(full_dataset)
+            logger.info(f"数据集 '{dataset_name}' 未进行验证集划分，所有数据将用于训练。")
+
+    if not all_train_datasets:
+        logger.error("没有成功加载任何训练数据集，请检查数据集配置。")
+        exit(1)
+
+    combined_train_dataset = ConcatDataset(all_train_datasets)
+    logger.info(f"总训练数据集大小: {len(combined_train_dataset)} 条。")
+
     optimizer = create_optimizer(model, args)
     model_engine, optimizer, _, _ = deepspeed.initialize(
         args=args, model=model, optimizer=optimizer, config=args.deepspeed
     )
     
-    train_sampler = DistributedSampler(train_dataset, num_replicas=model_engine.world_size, rank=model_engine.rank)
+    train_sampler = DistributedSampler(combined_train_dataset, num_replicas=model_engine.world_size, rank=model_engine.rank)
     train_dataloader = DataLoader(
-        train_dataset, 
+        combined_train_dataset, 
         batch_size=args.per_device_train_batch_size, 
         sampler=train_sampler,
         num_workers=args.num_workers,
         pin_memory=True
     )
+
+    # Prepare individual evaluation dataloaders for specified datasets
+    eval_dataloaders_for_scripts = {}
+    for ds_name, eval_part_dataset in eval_datasets_by_name.items():
+        eval_sampler = DistributedSampler(eval_part_dataset, num_replicas=model_engine.world_size, rank=model_engine.rank, shuffle=False)
+        eval_dataloader = DataLoader(
+            eval_part_dataset,
+            batch_size=args.per_device_train_batch_size,
+            sampler=eval_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True
+        )
+        eval_dataloaders_for_scripts[ds_name] = eval_dataloader
 
     start_epoch = 0
     global_step = 0
@@ -358,6 +445,40 @@ def main():
                 }, step=global_step)
                 if global_step % 10 == 0:
                      logger.info(f"Epoch: {epoch+1}, Step: {global_step}, Loss: {loss.item():.4f}")
+
+            if args.eval_steps > 0 and global_step % args.eval_steps == 0:
+                if args.local_rank == 0:
+                    logger.info(f"***** 正在评估 (Step: {global_step}) *****")
+                    model_engine.eval()
+                    
+                    # Run per-dataset evaluation scripts
+                    for ds_name, eval_scripts_for_ds in eval_config_from_args.items():
+                        eval_dataloader_for_ds = eval_dataloaders_for_scripts.get(ds_name)
+                        
+                        if eval_dataloader_for_ds and eval_scripts_for_ds:
+                            logger.info(f"----- 正在评估数据集 '{ds_name}' (Step: {global_step}) -----")
+                            for eval_script_name, eval_script_path in eval_scripts_for_ds:
+                                eval_module = loaded_eval_modules.get(eval_script_name)
+                                if eval_module:
+                                    logger.info(f"正在运行评估脚本: {eval_script_name} on dataset '{ds_name}'")
+                                    results = eval_module.evaluate(
+                                        model_engine, 
+                                        processor, 
+                                        eval_dataloader_for_ds, 
+                                        args.output_dir, 
+                                        args.local_rank,
+                                        temperature=args.temperature,
+                                        top_p=args.top_p,
+                                        top_k=args.top_k
+                                    )
+                                    training_logger.log({f'eval_results_{ds_name}_{eval_script_name}': results}, step=global_step)
+                                    logger.info(f"评估脚本 '{eval_script_name}' on dataset '{ds_name}' 结果 (Step: {global_step}): {results}")
+                                else:
+                                    logger.warning(f"评估脚本 '{eval_script_name}' 未成功加载，跳过。")
+                        elif local_rank == 0:
+                            logger.info(f"数据集 '{ds_name}' 没有指定评估脚本或没有评估数据，跳过其特定评估。")
+
+                    model_engine.train() # 切换回训练模式
 
             if global_step % args.save_steps == 0:
                 checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{global_step}")

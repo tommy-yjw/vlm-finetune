@@ -1,0 +1,7 @@
+{
+  "eval_scripts": {
+    "bbox_mbr_pass_rate": "qwen_finetune_project/evaluation/eval_bbox_mbr_and_pass_rate.py",
+    "bbox_per_object": "qwen_finetune_project/evaluation/eval_bbox_per_object.py",
+    "vqa_template": "qwen_finetune_project/evaluation/eval_vqa_template.py"
+  }
+}

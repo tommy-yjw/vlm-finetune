@@ -8,7 +8,7 @@ from typing import List, Dict, Tuple, Optional
 
 import torch
 import deepspeed
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, ConcatDataset # Added ConcatDataset
 from transformers import (
     AutoModelForCausalLM,
     AutoProcessor,
@@ -25,7 +25,7 @@ except Exception:
     VLLM_AVAILABLE = False
 
 # ---- Your dataset (expects text prompts + images + optional image_paths) ----
-from datasets.custom_dataset import QwenVLDataset  # prompt-only for RL is common
+from datasets.dataset_registry import get_dataset, load_datasets_from_config # Changed import to dataset_registry and added load_datasets_from_config
 
 # ---- GRPO utils (token log-probs + loss) ----
 from core.grpo_utils import calculate_log_probs, compute_grpo_loss
@@ -90,8 +90,12 @@ def parse_arguments():
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--resume_from_checkpoint', type=str, default=None)
 
-    # Datasets: list of (json_path, image_root)
-    parser.add_argument('--datasets', nargs=2, action='append', metavar=('JSON_PATH', 'IMAGE_ROOT'), required=True)
+    # Datasets: Removed old --datasets, added new ones
+    parser.add_argument("--dataset_config_path", type=str, default="./configs/dataset_config.json", help="数据集注册配置文件的路径")
+    parser.add_argument("--dataset_names", type=str, nargs='+', required=True, help="要使用的已注册数据集的名称列表")
+    parser.add_argument("--min_pixels", type=int, default=None, help="图片的最小像素数 (宽 * 高)")
+    parser.add_argument("--max_pixels", type=int, default=None, help="图片的最大像素数 (宽 * 高)")
+    parser.add_argument("--train_split_ratio", type=float, default=0.9, help="训练集和验证集的划分比例 (0.0到1.0之间)")
 
     # GRPO hyperparams
     parser.add_argument('--epochs', type=int, default=1)
@@ -118,6 +122,10 @@ def parse_arguments():
 
     # Logging & saving
     parser.add_argument('--save_steps', type=int, default=100)
+    parser.add_argument('--eval_steps', type=int, default=100, help="每N步进行一次评估")
+    parser.add_argument("--eval_script_registry_path", type=str, default="./configs/eval_script_registry.json", help="评估脚本注册配置文件的路径")
+    parser.add_argument("--eval_dataset_scripts", type=str, nargs='*', default=[],
+                        help="指定要评估的数据集及其对应的评估脚本。格式: 'dataset_name:script_name1,script_name2 ...'")
     parser.add_argument('--save_total_limit', type=int, default=5, help='max number of checkpoints to keep')
     parser.add_argument('--use_wandb', action='store_true')
     parser.add_argument('--wandb_project', type=str, default='qwen_vl_grpo')
@@ -150,6 +158,25 @@ def load_reward_function(script_path: str):
     if not hasattr(reward_function_module, 'get_reward_function'):
         raise AttributeError(f"脚本 {script_path} 中未找到 get_reward_function()")
     return reward_function_module.get_reward_function()
+
+
+def load_evaluation_modules(eval_scripts_config: List[List[str]]) -> Dict:
+    """动态加载评估脚本作为模块"""
+    if not eval_scripts_config: return {}
+    eval_modules = {}
+    for name, path in eval_scripts_config:
+        if not os.path.exists(path):
+            logger.warning(f"评估脚本路径不存在: {path}，跳过。")
+            continue
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if not hasattr(module, 'evaluate'):
+            logger.warning(f"评估脚本 {path} 中未找到 'evaluate' 函数，跳过。")
+            continue
+        eval_modules[name] = module
+        logger.info(f"成功加载评估模块 '{name}' 从 {path}")
+    return eval_modules
 
 
 # ------------------------ Rollout Engines ------------------------
@@ -255,11 +282,51 @@ def main():
         args.global_rank = 0
         args.world_size = 1
 
+    # 加载并注册数据集
+    load_datasets_from_config(args.dataset_config_path)
+
     # (Optional) reward function
     # Keep optional to allow dry-run without a script
     reward_fn = None
     if hasattr(args, 'reward_function_path') and args.__dict__.get('reward_function_path'):
         reward_fn = load_reward_function(args.reward_function_path)
+
+    # Load evaluation script registry
+    eval_registry = {}
+    if os.path.exists(args.eval_script_registry_path):
+        with open(args.eval_script_registry_path, 'r', encoding='utf-8') as f:
+            eval_registry = json.load(f).get("eval_scripts", {})
+    else:
+        logger.warning(f"评估脚本注册文件未找到: {args.eval_script_registry_path}")
+
+    # Parse eval_dataset_scripts argument
+    eval_config_from_args = {} # {dataset_name: [[script_name, script_path], ...]}
+    all_eval_scripts_to_load = set() # Collect all unique eval scripts paths
+    for entry in args.eval_dataset_scripts:
+        parts = entry.split(':')
+        if len(parts) != 2:
+            logger.warning(f"无效的 --eval_dataset_scripts 格式: {entry}. 预期格式为 'dataset_name:script_name1,script_name2,...'. 跳过。")
+            continue
+        
+        dataset_name, script_names_str = parts
+        script_names = script_names_str.split(',')
+        
+        scripts_for_dataset = []
+        for script_name in script_names:
+            script_path = eval_registry.get(script_name)
+            if script_path:
+                scripts_for_dataset.append([script_name, script_path])
+                all_eval_scripts_to_load.add((script_name, script_path))
+            else:
+                logger.warning(f"在注册表中未找到评估脚本 '{script_name}'。")
+        
+        if scripts_for_dataset:
+            eval_config_from_args[dataset_name] = scripts_for_dataset
+
+    # Load all unique evaluation modules once
+    loaded_eval_modules = load_evaluation_modules(list(all_eval_scripts_to_load))
+    if not loaded_eval_modules and args.eval_steps > 0:
+        logger.warning("已设置 eval_steps > 0 但没有加载任何评估脚本，将只记录验证集损失。")
 
     # Processor
     processor = AutoProcessor.from_pretrained(args.model_name_or_path, trust_remote_code=True)
@@ -319,11 +386,48 @@ def main():
     else:
         logger.info("Using full-parameter finetuning (no LoRA/QLoRA)")
 
-    # Dataset (use the first pair for now; extend to multiple if needed)
-    json_path, image_root = args.datasets[0]
-    dataset = QwenVLDataset(json_path, image_root, processor, args.max_seq_length)
-    sampler = DistributedSampler(dataset)
-    dataloader = DataLoader(dataset, batch_size=args.per_device_train_batch_size, sampler=sampler, num_workers=args.num_workers)
+    # Prepare datasets for training and evaluation
+    all_train_datasets = []
+    eval_datasets_by_name = {} # Store evaluation datasets by their original name
+    
+    for dataset_name in args.dataset_names:
+        full_dataset = get_dataset(
+            name=dataset_name,
+            processor=processor,
+            max_length=args.max_seq_length,
+            min_pixels=args.min_pixels,
+            max_pixels=args.max_pixels
+        )
+        
+        if not full_dataset:
+            logger.error(f"无法加载数据集 '{dataset_name}'，请检查其是否已注册。")
+            exit(1)
+
+        # Split each dataset into train and eval parts
+        dataset_len = len(full_dataset)
+        train_len = int(args.train_split_ratio * dataset_len)
+        eval_len = dataset_len - train_len
+
+        if eval_len > 0:
+            train_part, eval_part = torch.utils.data.random_split(full_dataset, [train_len, eval_len])
+            all_train_datasets.append(train_part)
+            
+            # Only add to eval_datasets_by_name if it's specified for evaluation in args
+            if dataset_name in eval_config_from_args:
+                eval_datasets_by_name[dataset_name] = eval_part
+                logger.info(f"数据集 '{dataset_name}' 已划分为训练集 ({train_len} 条) 和验证集 ({eval_len} 条)，并准备进行特定评估。")
+            else:
+                logger.info(f"数据集 '{dataset_name}' 已划分为训练集 ({train_len} 条) 和验证集 ({eval_len} 条)。")
+        else:
+            all_train_datasets.append(full_dataset)
+            logger.info(f"数据集 '{dataset_name}' 未进行验证集划分，所有数据将用于训练。")
+
+    if not all_train_datasets:
+        logger.error("没有成功加载任何训练数据集，请检查数据集配置。")
+        exit(1)
+
+    train_dataset = ConcatDataset(all_train_datasets)
+    logger.info(f"总训练数据集大小: {len(train_dataset)} 条。")
 
     # DeepSpeed engine
     model_engine, optimizer, _, _ = deepspeed.initialize(
@@ -353,10 +457,33 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # DataLoaders
+    train_sampler = DistributedSampler(train_dataset, num_replicas=model_engine.world_size, rank=model_engine.rank)
+    train_dataloader = DataLoader(
+        train_dataset, 
+        batch_size=args.per_device_train_batch_size, 
+        sampler=train_sampler,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+
+    # Prepare individual evaluation dataloaders for specified datasets
+    eval_dataloaders_for_scripts = {}
+    for ds_name, eval_part_dataset in eval_datasets_by_name.items():
+        eval_sampler = DistributedSampler(eval_part_dataset, num_replicas=model_engine.world_size, rank=model_engine.rank, shuffle=False)
+        eval_dataloader = DataLoader(
+            eval_part_dataset,
+            batch_size=args.per_device_train_batch_size,
+            sampler=eval_sampler,
+            num_workers=args.num_workers,
+            pin_memory=True
+        )
+        eval_dataloaders_for_scripts[ds_name] = eval_dataloader
+
     # Training loop
     for epoch in range(args.epochs):
-        sampler.set_epoch(epoch)
-        for step, batch in enumerate(dataloader):
+        train_sampler.set_epoch(epoch)
+        for step, batch in enumerate(train_dataloader):
             model_engine.train()
 
             prompts: List[str] = batch['text']
@@ -382,9 +509,27 @@ def main():
                         # Build full ids by re-encoding prompt+response with processor
                         full_texts = [p + r for p, r in zip(prompts, responses)]
                         full_inputs = processor(text=full_texts, images=[None]*len(full_texts), return_tensors='pt', padding=True).to(model_engine.device)
-                        log_probs = calculate_log_probs(model_engine.module, full_inputs['input_ids'], prompt_len=None, attention_mask=full_inputs.get('attention_mask'))
+                        # When using vLLM, images are not passed to calculate_log_probs for the main model,
+                        # as the log_probs are computed on the full text (prompt + response) without image context
+                        # for the purpose of GRPO loss. The image context is handled during vLLM generation.
+                        # However, if the model's forward method *requires* pixel_values even for text-only,
+                        # we need to pass dummy ones or ensure the model handles it.
+                        # For Qwen-VL, the pixel_values are crucial. So, we need to pass the original pixel_values.
+                        log_probs = calculate_log_probs(
+                            model_engine.module, 
+                            full_inputs['input_ids'], 
+                            full_inputs.get('attention_mask'), 
+                            pixel_values=images, # Pass original images (pixel_values)
+                            prompt_len=None # No specific prompt_len for full sequence log_probs
+                        )
                         if ref_model is not None:
-                            ref_log_probs = calculate_log_probs(ref_model, full_inputs['input_ids'], prompt_len=None, attention_mask=full_inputs.get('attention_mask'))
+                            ref_log_probs = calculate_log_probs(
+                                ref_model, 
+                                full_inputs['input_ids'], 
+                                full_inputs.get('attention_mask'), 
+                                pixel_values=images, # Pass original images (pixel_values)
+                                prompt_len=None
+                            )
                     else:
                         # HF engine: generate & compute log_probs on same tokens
                         inputs = processor(text=prompts, images=images, return_tensors='pt', padding=True).to(model_engine.device)
@@ -394,12 +539,24 @@ def main():
                             max_new_tokens=args.rollout_max_new_tokens,
                             do_sample=True,
                             top_p=args.top_p,
-                            temperature=args.temperature,
+                            temperature=args.temperature, # Fixed self.temperature to args.temperature
                         )
                         responses = processor.batch_decode(gen_ids[:, prompt_len:], skip_special_tokens=True)
-                        log_probs = calculate_log_probs(model_engine.module, gen_ids, prompt_len, inputs['attention_mask'])
+                        log_probs = calculate_log_probs(
+                            model_engine.module, 
+                            gen_ids, 
+                            inputs['attention_mask'], 
+                            pixel_values=inputs['pixel_values'], # Pass pixel_values from inputs
+                            prompt_len=prompt_len
+                        )
                         if ref_model is not None:
-                            ref_log_probs = calculate_log_probs(ref_model, gen_ids, prompt_len, inputs['attention_mask'])
+                            ref_log_probs = calculate_log_probs(
+                                ref_model, 
+                                gen_ids, 
+                                inputs['attention_mask'], 
+                                pixel_values=inputs['pixel_values'], # Pass pixel_values from inputs
+                                prompt_len=prompt_len
+                            )
 
                     all_responses_per_k.append(responses)
                     all_log_probs_per_k.append(log_probs)
@@ -468,9 +625,43 @@ def main():
                 logger.info(f"Checkpoint saved: {os.path.join(args.output_dir, tag)}")
                 cleanup_old_checkpoints(args.output_dir, args.save_total_limit)
 
+            if args.eval_steps > 0 and global_step % args.eval_steps == 0:
+                if args.global_rank == 0:
+                    logger.info(f"***** 正在评估 (Step: {global_step}) *****")
+                    model_engine.eval()
+                    
+                    # Run per-dataset evaluation scripts
+                    for ds_name, eval_scripts_for_ds in eval_config_from_args.items():
+                        eval_dataloader_for_ds = eval_dataloaders_for_scripts.get(ds_name)
+                        
+                        if eval_dataloader_for_ds and eval_scripts_for_ds:
+                            logger.info(f"----- 正在评估数据集 '{ds_name}' (Step: {global_step}) -----")
+                            for eval_script_name, eval_script_path in eval_scripts_for_ds:
+                                eval_module = loaded_eval_modules.get(eval_script_name)
+                                if eval_module:
+                                    logger.info(f"正在运行评估脚本: {eval_script_name} on dataset '{ds_name}'")
+                                    results = eval_module.evaluate(
+                                        model_engine, 
+                                        processor, 
+                                        eval_dataloader_for_ds, 
+                                        args.output_dir, 
+                                        args.local_rank,
+                                        temperature=args.temperature,
+                                        top_p=args.top_p,
+                                        top_k=50 # top_k is not in args, so we hardcode it
+                                    )
+                                    tlogger.log({f'eval_results_{ds_name}_{eval_script_name}': results}, step=global_step)
+                                    logger.info(f"评估脚本 '{eval_script_name}' on dataset '{ds_name}' 结果 (Step: {global_step}): {results}")
+                                else:
+                                    logger.warning(f"评估脚本 '{eval_script_name}' 未成功加载，跳过。")
+                        elif args.global_rank == 0:
+                            logger.info(f"数据集 '{ds_name}' 没有指定评估脚本或没有评估数据，跳过其特定评估。")
+
+                    model_engine.train() # 切换回训练模式
+
             global_step += 1
 
-    # final save
+    # Final save
     if args.global_rank == 0:
         tag = f"step-{global_step}-final"
         model_engine.save_checkpoint(args.output_dir, tag=tag)
