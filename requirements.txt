@@ -10,3 +10,4 @@ bitsandbytes>=0.41.3
 flash-attn>=2.5.0
 importlib-metadata>=6.0.0
 scipy>=1.10.0
+megatron-lm
