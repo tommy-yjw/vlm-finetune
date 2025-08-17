@@ -51,8 +51,6 @@ deepspeed --num_gpus=${NUM_GPUS} train.py \
     --learning_rate_projector 1e-5 \
     \
     --max_seq_length 2048 \
-    --save_steps 500 \
-    --eval_steps 250 \
     \
     --temperature 1.0 \
     --top_p 1.0 \

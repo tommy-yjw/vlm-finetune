@@ -131,11 +131,14 @@ def parse_arguments():
     parser.add_argument("--lora_dropout", type=float, default=0.05, help="LoRA/QLoRA的dropout")
 
     # --- 保存、评估与日志 ---
-    parser.add_argument("--save_steps", type=int, default=500, help="每N步保存一次检查点")
-    parser.add_argument("--eval_steps", type=int, default=250, help="每N步进行一次评估")
+    parser.add_argument("--save_steps", type=int, default=None, help="每N步保存一次检查点。如果未设置，则使用 --save_interval_epochs。")
+    parser.add_argument("--save_interval_epochs", type=float, default=1.0, help="每N个epoch保存一次检查点。")
+    parser.add_argument("--eval_steps", type=int, default=None, help="每N步进行一次评估。如果未设置，则使用 --eval_interval_epochs。")
+    parser.add_argument("--eval_interval_epochs", type=float, default=1.0, help="每N个epoch进行一次评估。")
     parser.add_argument("--eval_script_registry_path", type=str, default="./configs/eval_script_registry.json", help="评估脚本注册配置文件的路径")
     parser.add_argument("--eval_dataset_scripts", type=str, nargs='*', default=[],
-                        help="指定要评估的数据集及其对应的评估脚本。格式: 'dataset_name:script_name1,script_name2 ...' (脚本名称在 eval_script_registry.json 中定义)")
+                        help="指定要评估的数据集及其对应的评估脚本。格式: 'dataset_name:script_name1,script_name2,...' (脚本名称在 eval_script_registry.json 中定义)")
+    parser.add_argument("--use_eval_function", action='store_true', help="是否使用评估函数进行评估，如果为False，则只计算验证集损失。")
     parser.add_argument("--use_wandb", action='store_true', help="启用WandB")
     parser.add_argument("--wandb_project", type=str, default="qwen_vl_finetune", help="WandB项目名称")
     parser.add_argument("--wandb_run_name", type=str, default=f"run-{int(time.time())}", help="WandB运行名称")
@@ -399,6 +402,15 @@ def main():
         pin_memory=True
     )
 
+    # 根据 epoch 间隔计算实际的 save_steps 和 eval_steps
+    steps_per_epoch = len(train_dataloader)
+    if args.save_steps is None:
+        args.save_steps = max(1, int(steps_per_epoch * args.save_interval_epochs))
+        logger.info(f"保存步数 (save_steps) 已设置为每 {args.save_interval_epochs} 个 epoch 保存一次，即 {args.save_steps} 步。")
+    if args.eval_steps is None:
+        args.eval_steps = max(1, int(steps_per_epoch * args.eval_interval_epochs))
+        logger.info(f"评估步数 (eval_steps) 已设置为每 {args.eval_interval_epochs} 个 epoch 评估一次，即 {args.eval_steps} 步。")
+
     # Prepare individual evaluation dataloaders for specified datasets
     eval_dataloaders_for_scripts = {}
     for ds_name, eval_part_dataset in eval_datasets_by_name.items():
@@ -451,32 +463,57 @@ def main():
                     logger.info(f"***** 正在评估 (Step: {global_step}) *****")
                     model_engine.eval()
                     
-                    # Run per-dataset evaluation scripts
-                    for ds_name, eval_scripts_for_ds in eval_config_from_args.items():
-                        eval_dataloader_for_ds = eval_dataloaders_for_scripts.get(ds_name)
-                        
-                        if eval_dataloader_for_ds and eval_scripts_for_ds:
-                            logger.info(f"----- 正在评估数据集 '{ds_name}' (Step: {global_step}) -----")
-                            for eval_script_name, eval_script_path in eval_scripts_for_ds:
-                                eval_module = loaded_eval_modules.get(eval_script_name)
-                                if eval_module:
-                                    logger.info(f"正在运行评估脚本: {eval_script_name} on dataset '{ds_name}'")
-                                    results = eval_module.evaluate(
-                                        model_engine, 
-                                        processor, 
-                                        eval_dataloader_for_ds, 
-                                        args.output_dir, 
-                                        args.local_rank,
-                                        temperature=args.temperature,
-                                        top_p=args.top_p,
-                                        top_k=args.top_k
-                                    )
-                                    training_logger.log({f'eval_results_{ds_name}_{eval_script_name}': results}, step=global_step)
-                                    logger.info(f"评估脚本 '{eval_script_name}' on dataset '{ds_name}' 结果 (Step: {global_step}): {results}")
-                                else:
-                                    logger.warning(f"评估脚本 '{eval_script_name}' 未成功加载，跳过。")
-                        elif local_rank == 0:
-                            logger.info(f"数据集 '{ds_name}' 没有指定评估脚本或没有评估数据，跳过其特定评估。")
+                    if args.use_eval_function:
+                        # Run per-dataset evaluation scripts
+                        for ds_name, eval_scripts_for_ds in eval_config_from_args.items():
+                            eval_dataloader_for_ds = eval_dataloaders_for_scripts.get(ds_name)
+                            
+                            if eval_dataloader_for_ds and eval_scripts_for_ds:
+                                logger.info(f"----- 正在评估数据集 '{ds_name}' (Step: {global_step}) -----")
+                                for eval_script_name, eval_script_path in eval_scripts_for_ds:
+                                    eval_module = loaded_eval_modules.get(eval_script_name)
+                                    if eval_module:
+                                        logger.info(f"正在运行评估脚本: {eval_script_name} on dataset '{ds_name}'")
+                                        results = eval_module.evaluate(
+                                            model_engine, 
+                                            processor, 
+                                            eval_dataloader_for_ds, 
+                                            args.output_dir, 
+                                            args.local_rank,
+                                            temperature=args.temperature,
+                                            top_p=args.top_p,
+                                            top_k=args.top_k
+                                        )
+                                        training_logger.log({f'eval_results_{ds_name}_{eval_script_name}': results}, step=global_step)
+                                        logger.info(f"评估脚本 '{eval_script_name}' on dataset '{ds_name}' 结果 (Step: {global_step}): {results}")
+                                    else:
+                                        logger.warning(f"评估脚本 '{eval_script_name}' 未成功加载，跳过。")
+                            elif args.local_rank == 0: # Changed from local_rank to args.local_rank for consistency
+                                logger.info(f"数据集 '{ds_name}' 没有指定评估脚本或没有评估数据，跳过其特定评估。")
+                    else:
+                        # Calculate validation loss
+                        total_eval_loss = 0.0
+                        num_eval_batches = 0
+                        if eval_dataloaders_for_scripts:
+                            logger.info(f"----- 正在计算验证集损失 (Step: {global_step}) -----")
+                            for ds_name, eval_dataloader_for_ds in eval_dataloaders_for_scripts.items():
+                                for eval_batch in eval_dataloader_for_ds:
+                                    if not eval_batch: continue
+                                    eval_batch = {k: v.to(model_engine.device) for k, v in eval_batch.items() if isinstance(v, torch.Tensor)}
+                                    with torch.no_grad():
+                                        eval_outputs = model_engine(**eval_batch)
+                                        eval_loss = eval_outputs.loss
+                                    total_eval_loss += eval_loss.item()
+                                    num_eval_batches += 1
+                            
+                            if num_eval_batches > 0:
+                                average_eval_loss = total_eval_loss / num_eval_batches
+                                training_logger.log({'eval_loss': average_eval_loss}, step=global_step)
+                                logger.info(f"平均验证损失 (Step: {global_step}): {average_eval_loss:.4f}")
+                            else:
+                                logger.warning("没有可用的验证数据来计算损失。")
+                        else:
+                            logger.warning("没有配置任何验证数据集，跳过验证损失计算。")
 
                     model_engine.train() # 切换回训练模式
 

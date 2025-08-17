@@ -132,6 +132,10 @@ def extra_args_provider(parser):
     # Note: Megatron's --save argument is used for the output directory.
     # Note: Megatron's --load argument is used to resume from a checkpoint.
     
+    # --- 保存、评估与日志 ---
+    group.add_argument("--save_interval_epochs", type=float, default=1.0, help="每N个epoch保存一次检查点。")
+    group.add_argument("--eval_interval_epochs", type=float, default=0.5, help="每N个epoch进行一次评估。")
+
     # --- 数据集配置 ---
     group.add_argument("--dataset_config_path", type=str, default="./configs/dataset_config.json", help="数据集注册配置文件的路径")
     group.add_argument("--dataset_names", type=str, nargs='+', required=True, help="要使用的已注册数据集的名称列表")
@@ -415,6 +419,15 @@ def main():
     # TODO: 创建验证数据迭代器和评估回调
     valid_data_iterator = None
 
+    # 根据 epoch 间隔计算实际的 save-interval 和 eval-interval
+    # Megatron的 save-interval 和 eval-interval 是以迭代步数计算的
+    if not hasattr(args, 'save_interval') or args.save_interval is None:
+        args.save_interval = max(1, int(iters_per_epoch * args.save_interval_epochs))
+        logger.info(f"保存间隔 (save-interval) 已设置为每 {args.save_interval_epochs} 个 epoch 保存一次，即 {args.save_interval} 步。")
+    if not hasattr(args, 'eval_interval') or args.eval_interval is None:
+        args.eval_interval = max(1, int(iters_per_epoch * args.eval_interval_epochs))
+        logger.info(f"评估间隔 (eval-interval) 已设置为每 {args.eval_interval_epochs} 个 epoch 评估一次，即 {args.eval_interval} 步。")
+
     # 调用Megatron的训练函数
     iteration = train(
         forward_step_func=forward_step,
@@ -422,7 +435,8 @@ def main():
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
         train_data_iterator=train_data_iterator,
-        valid_data_iterator=valid_data_iterator
+        valid_data_iterator=valid_data_iterator,
+        # Megatron的 train 函数会使用 args.save_interval 和 args.eval_interval
     )
 
     logger.info(f"训练完成，最终步数: {iteration}")

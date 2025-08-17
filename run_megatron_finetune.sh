@@ -165,9 +165,7 @@ CMD="python -m torch.distributed.launch \
     --lora_alpha ${LORA_ALPHA} \
     --lora_dropout ${LORA_DROPOUT} \
     --save ${OUTPUT_DIR} \
-    --save-interval 1000 \
     --log-interval 10 \
-    --eval-interval 1000 \
     --eval-iters 10 \
     --tensor-model-parallel-size 1 \
     --pipeline-model-parallel-size 1 \

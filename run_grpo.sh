@@ -49,8 +49,6 @@ deepspeed --num_gpus=${NUM_GPUS} train_grpo.py \
     --learning_rate_lora 1e-6 \
     \
     --max_seq_length 2048 \
-    --save_steps 500 \
-    --eval_steps 250 \
     \
     --temperature 0.7 \
     --top_p 0.9 \

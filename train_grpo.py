@@ -121,8 +121,10 @@ def parse_arguments():
     parser.add_argument('--lora_dropout', type=float, default=0.05)
 
     # Logging & saving
-    parser.add_argument('--save_steps', type=int, default=100)
-    parser.add_argument('--eval_steps', type=int, default=100, help="每N步进行一次评估")
+    parser.add_argument('--save_steps', type=int, default=None, help="每N步保存一次检查点。如果未设置，则使用 --save_interval_epochs。")
+    parser.add_argument('--save_interval_epochs', type=float, default=1.0, help="每N个epoch保存一次检查点。")
+    parser.add_argument('--eval_steps', type=int, default=None, help="每N步进行一次评估。如果未设置，则使用 --eval_interval_epochs。")
+    parser.add_argument('--eval_interval_epochs', type=float, default=0.5, help="每N个epoch进行一次评估。")
     parser.add_argument("--eval_script_registry_path", type=str, default="./configs/eval_script_registry.json", help="评估脚本注册配置文件的路径")
     parser.add_argument("--eval_dataset_scripts", type=str, nargs='*', default=[],
                         help="指定要评估的数据集及其对应的评估脚本。格式: 'dataset_name:script_name1,script_name2 ...'")
@@ -466,6 +468,15 @@ def main():
         num_workers=args.num_workers,
         pin_memory=True
     )
+
+    # 根据 epoch 间隔计算实际的 save_steps 和 eval_steps
+    steps_per_epoch = len(train_dataloader)
+    if args.save_steps is None:
+        args.save_steps = max(1, int(steps_per_epoch * args.save_interval_epochs))
+        logger.info(f"保存步数 (save_steps) 已设置为每 {args.save_interval_epochs} 个 epoch 保存一次，即 {args.save_steps} 步。")
+    if args.eval_steps is None:
+        args.eval_steps = max(1, int(steps_per_epoch * args.eval_interval_epochs))
+        logger.info(f"评估步数 (eval_steps) 已设置为每 {args.eval_interval_epochs} 个 epoch 评估一次，即 {args.eval_steps} 步。")
 
     # Prepare individual evaluation dataloaders for specified datasets
     eval_dataloaders_for_scripts = {}
