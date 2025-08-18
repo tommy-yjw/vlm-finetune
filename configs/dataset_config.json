@@ -1,18 +1,23 @@
 {
   "datasets": {
-    "my_dataset_1": {
-      "image_root": "./data/dataset1/images",
-      "json_path": "./data/dataset1/data.json",
+    "360_aigc_layout": {
+      "image_root": "/data/oceanus_ctr/j-yanjiangwei-jk/aigcimage/recon/workdir",
+      "json_path": "/data/oceanus_ctr/j-yanjiangwei-jk/aigcimage/recon/workdir/train.json",
       "dataset_class": "QwenVLDataset"
     },
-    "my_dataset_2": {
-      "image_root": "./data/dataset2/pictures",
-      "json_path": "./data/dataset2/data.json",
+    "fix_direction": {
+      "image_root": "/data/oceanus_ctr/j-yanjiangwei-jk/aigcimage/recon/output",
+      "json_path": "/data/oceanus_ctr/j-yanjiangwei-jk/aigcimage/recon/output/train.json",
       "dataset_class": "QwenVLDataset"
     },
-    "my_grpo_dataset": {
-      "image_root": "./data/dataset1/images",
-      "json_path": "./data/dataset1/grpo_dataset.json",
+    "CGL": {
+      "image_root": "/data/oceanus_ctr/j-yanjiangwei-jk/data/CGL-Dataset-v2/images",
+      "json_path": "/data/oceanus_ctr/j-yanjiangwei-jk/data/CGL-Dataset-v2/train.json",
+      "dataset_class": "QwenVLDataset"
+    },
+    "PKU":{
+      "image_root": "/data/oceanus_ctr/j-yanjiangwei-jk/data/PKU-PosterLayout/inpainted_images",
+      "json_path": "/data/oceanus_ctr/j-yanjiangwei-jk/data/PKU-PosterLayout/train.json",
       "dataset_class": "QwenVLDataset"
     }
   }

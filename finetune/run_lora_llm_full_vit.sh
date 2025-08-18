@@ -1,20 +1,20 @@
 #!/bin/bash
 
 # --- 配置 ---
-export BASE_MODEL="Qwen/Qwen2.5-7B-VL-Chat"
-export OUTPUT_DIR="./output/qwen_full_finetune"
+export BASE_MODEL="/data/oceanus_ctr/j-yanjiangwei-jk/.cache/modelscope/hub/models/Qwen/Qwen2.5-VL-7B-Instruct"
+export OUTPUT_DIR="./output/qwen_lora_llm_full_vit"
 export DS_CONFIG="./configs/deepspeed_config.json"
 
 # --- GPU与并行配置 ---
-NUM_GPUS=4
-NUM_WORKERS=8 # 根据你的CPU核心数和内存大小调整
+NUM_GPUS=1
+NUM_WORKERS=16 # 根据你的CPU核心数和内存大小调整
 
 # --- 训练参数 ---
-EPOCHS=3
+EPOCHS=4
 BATCH_SIZE_PER_GPU=1
 GRAD_ACCUM_STEPS=16
-MIN_PIXELS=50000 # 示例值，根据需要调整
-MAX_PIXELS=1000000 # 示例值，根据需要调整
+MIN_PIXELS=200704 # 示例值，根据需要调整
+MAX_PIXELS=4005632 # 示例值，根据需要调整
 TRAIN_SPLIT_RATIO=0.9 # 训练集划分比例，0.0到1.0之间
 
 # --- 启动命令 ---
@@ -33,10 +33,10 @@ deepspeed --num_gpus=${NUM_GPUS} train.py \
     --output_dir ${OUTPUT_DIR} \
     ${RESUME_FLAG} \
     \
-    --tuning_strategy "full" \
+    --tuning_strategy "lora_llm_full_vit" \
     \
     --dataset_config_path ./configs/dataset_config.json \
-    --dataset_names my_dataset_1 my_dataset_2 \
+    --dataset_names 360_aigc_layout fix_direction CGL PKU\
     --min_pixels ${MIN_PIXELS} \
     --max_pixels ${MAX_PIXELS} \
     --train_split_ratio ${TRAIN_SPLIT_RATIO} \
@@ -52,14 +52,9 @@ deepspeed --num_gpus=${NUM_GPUS} train.py \
     \
     --max_seq_length 2048 \
     \
-    --temperature 1.0 \
-    --top_p 1.0 \
-    --top_k 50 \
-    \
-    --eval_script_registry_path ./configs/eval_script_registry.json \
-    --eval_dataset_scripts \
-        "my_dataset_1:bbox_mbr_pass_rate,bbox_per_object" \
-        "my_dataset_2:vqa_template" \
+    --temperature 0.3 \
+    --top_p 0.9 \
+    --top_k 3 \
     \
     --use_wandb --wandb_project "qwen-vl-finetune" --wandb_run_name "full-finetune-run" \
     --log_to_file

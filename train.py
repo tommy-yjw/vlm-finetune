@@ -11,12 +11,13 @@ import deepspeed
 from torch.utils.data import DataLoader, ConcatDataset, DistributedSampler
 
 from transformers import (
-    AutoModelForCausalLM,
+    Qwen2_5_VLForConditionalGeneration,
     AutoProcessor,
     BitsAndBytesConfig
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-
+import sys
+sys.path.append('/data/oceanus_ctr/j-yanjiangwei-jk/vlm-finetune')
 from datasets.dataset_registry import get_dataset, register_dataset, load_datasets_from_config # 导入数据集注册模块和加载函数
 
 # 尝试导入 wandb
@@ -298,10 +299,10 @@ def main():
         )
         torch_dtype = torch.bfloat16
 
-    model = AutoModelForCausalLM.from_pretrained(
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         args.model_name_or_path,
         torch_dtype=torch_dtype,
-        quantization_config=quantization_config,
+        # quantization_config=quantization_config,
         trust_remote_code=True,
         use_flash_attention_2=True,
     )
@@ -342,7 +343,7 @@ def main():
 
     # Load all unique evaluation modules once
     loaded_eval_modules = load_evaluation_modules(list(all_eval_scripts_to_load))
-    if not loaded_eval_modules and args.eval_steps > 0:
+    if not loaded_eval_modules and args.eval_steps is not None and args.eval_steps > 0:
         logger.warning("已设置 eval_steps > 0 但没有加载任何评估脚本，将只记录验证集损失。")
 
     # Prepare datasets for training and evaluation

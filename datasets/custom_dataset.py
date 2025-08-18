@@ -73,10 +73,22 @@ class QwenVLDataset(Dataset):
         item = self.data[idx]
         loaded_images = [] 
         conversation = []
-        
-        image_paths_in_item = item.get('images', []) 
-        if not image_paths_in_item and 'image' in item:
-            image_paths_in_item = [item['image']]
+
+        # 统一处理 image 字段，避免 list 嵌套问题
+        image_field = item.get("image", [])
+        if isinstance(image_field, str):
+            image_paths_in_item = [image_field]
+        elif isinstance(image_field, list):
+            # 如果是 list，需要 flatten 一层，防止 [[...]] 的情况
+            image_paths_in_item = []
+            for x in image_field:
+                if isinstance(x, str):
+                    image_paths_in_item.append(x)
+                elif isinstance(x, list):
+                    image_paths_in_item.extend([str(xx) for xx in x])
+        else:
+            image_paths_in_item = []
+
 
         for relative_img_path in image_paths_in_item:
             full_img_path = os.path.join(self.image_root, relative_img_path)
@@ -93,12 +105,17 @@ class QwenVLDataset(Dataset):
             content = turn.get('value', '')
             
             while '<image>' in content:
-                content = content.replace('<image>', f'{self.processor.tokenizer.image_start_tag}{self.processor.tokenizer.image_tag}{self.processor.tokenizer.image_end_tag}', 1)
+                content = content.replace(
+                    '<image>',
+                    f'{self.processor.tokenizer.image_start_tag}{self.processor.tokenizer.image_tag}{self.processor.tokenizer.image_end_tag}',
+                    1
+                )
                 image_tag_counter += 1
             
             conversation.append({'role': role, 'content': content})
 
-        if not conversation: return {}
+        if not conversation:
+            return {}
 
         try:
             inputs = self.processor(
@@ -112,6 +129,7 @@ class QwenVLDataset(Dataset):
         inputs = {k: v.squeeze(0) for k, v in inputs.items()}
         inputs['labels'] = inputs['input_ids'].clone()
         return inputs
+
 
 
 class QwenVLDatasetWithAug(QwenVLDataset):
